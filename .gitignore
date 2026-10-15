@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ExamZHub
+*.db
+*.sqlite3
+node_modules/
+.DS_Store
