@@ -172,3 +172,27 @@ class EvaluationScore(db.Model):
 	rubric_id = db.Column(db.Integer, db.ForeignKey("rubrics.id"), nullable=False)
 	marks = db.Column(db.Float, nullable=False)
 	rubric = db.relationship("Rubric")
+
+
+class ExportJob(db.Model):
+	__tablename__ = "export_jobs"
+
+	id = db.Column(db.Integer, primary_key=True)
+	user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+	status = db.Column(db.String(20), default="Pending")
+	file_path = db.Column(db.String(255))
+	error = db.Column(db.String(255))
+	created_at = db.Column(db.DateTime, default=datetime.utcnow)
+	completed_at = db.Column(db.DateTime)
+
+
+class Notification(db.Model):
+	__tablename__ = "notifications"
+
+	id = db.Column(db.Integer, primary_key=True)
+	user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+	kind = db.Column(db.String(30), default="info")
+	message = db.Column(db.String(255), nullable=False)
+	link = db.Column(db.String(255))
+	is_read = db.Column(db.Boolean, default=False)
+	created_at = db.Column(db.DateTime, default=datetime.utcnow)

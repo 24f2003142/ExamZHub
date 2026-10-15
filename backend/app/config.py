@@ -21,3 +21,12 @@ class Config:
 	ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@examzhub.com")
 	ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123")
 	ENFORCE_DATE_WINDOWS = os.getenv("ENFORCE_DATE_WINDOWS", "0") == "1"
+	MAIL_SERVER = os.getenv("MAIL_SERVER", "")
+	MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
+	MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "1") == "1"
+	MAIL_USER = os.getenv("MAIL_USER", "")
+	MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
+	MAIL_FROM = os.getenv("MAIL_FROM", "ExamZHub <noreply@examzhub.com>")
+	GCHAT_WEBHOOK_URL = os.getenv("GCHAT_WEBHOOK_URL", "")
+	REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "8"))
+	REMINDER_MINUTE = int(os.getenv("REMINDER_MINUTE", "0"))

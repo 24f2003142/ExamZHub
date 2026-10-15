@@ -1,11 +1,13 @@
-from datetime import date, datetime
+import os
+from datetime import date, datetime, timedelta
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 from flask_jwt_extended import verify_jwt_in_request
 from sqlalchemy import or_
 
 from ..extensions import db
-from ..models import Booking, Course, Exam, Slot
+from ..models import Booking, Course, Exam, ExportJob, Notification, Slot
+from ..tasks import export_history_csv
 from ..utils import current_user
 from ..cache_utils import TTL_EXAM, TTL_LIST, TTL_RUBRIC, cached
 
@@ -335,3 +337,103 @@ def results():
         student_id=user.id, status="Completed"
     ).order_by(Booking.id.desc())
     return jsonify(results=[booking_dict(booking) for booking in rows if result_dict(booking)])
+
+
+def job_dict(job):
+    return dict(
+        id=job.id,
+        status=job.status,
+        error=job.error,
+        created_at=iso(job.created_at),
+        completed_at=iso(job.completed_at),
+        download=f"/api/student/export/{job.id}/download"
+        if job.status == "Done"
+        else None,
+    )
+
+
+@bp.post("/export")
+def start_export():
+    user = current_user()
+    recent = datetime.utcnow() - timedelta(minutes=5)
+    running = ExportJob.query.filter(
+        ExportJob.user_id == user.id,
+        ExportJob.status.in_(["Pending", "Processing"]),
+        ExportJob.created_at > recent,
+    ).first()
+    if running:
+        return jsonify(
+            job=job_dict(running), message="An export is already in progress"
+        ), 202
+    job = ExportJob(user_id=user.id)
+    db.session.add(job)
+    db.session.commit()
+    try:
+        export_history_csv.delay(job.id)
+    except Exception:
+        job.status = "Failed"
+        job.error = "Job queue unavailable"
+        db.session.commit()
+        return err("Could not queue the export. Try again shortly.", 503)
+    return jsonify(
+        job=job_dict(job),
+        message="Export started. You will be notified when it is ready.",
+    ), 202
+
+
+@bp.get("/export/<int:jid>")
+def export_status(jid):
+    job = db.session.get(ExportJob, jid)
+    if not job or job.user_id != current_user().id:
+        return err("Export not found", 404)
+    return jsonify(job=job_dict(job))
+
+
+@bp.get("/export/<int:jid>/download")
+def export_download(jid):
+    job = db.session.get(ExportJob, jid)
+    if not job or job.user_id != current_user().id:
+        return err("Export not found", 404)
+    if job.status != "Done" or not job.file_path or not os.path.exists(job.file_path):
+        return err("Export is not ready", 409)
+    return send_file(
+        job.file_path,
+        as_attachment=True,
+        download_name="examination_history.csv",
+        mimetype="text/csv",
+    )
+
+
+@bp.get("/notifications")
+def notifications():
+    user = current_user()
+    rows = (
+        Notification.query.filter_by(user_id=user.id)
+        .order_by(Notification.id.desc())
+        .limit(20)
+        .all()
+    )
+    unread = Notification.query.filter_by(user_id=user.id, is_read=False).count()
+    return jsonify(
+        unread=unread,
+        notifications=[
+            dict(
+                id=notification.id,
+                kind=notification.kind,
+                message=notification.message,
+                link=notification.link,
+                is_read=notification.is_read,
+                created_at=iso(notification.created_at),
+            )
+            for notification in rows
+        ],
+    )
+
+
+@bp.post("/notifications/read")
+def mark_read():
+    Notification.query.filter_by(
+        user_id=current_user().id, is_read=False
+    ).update({"is_read": True})
+    db.session.commit()
+    return jsonify(message="Marked as read")

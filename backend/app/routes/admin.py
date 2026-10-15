@@ -823,3 +823,27 @@ def unpublish_results(eid):
     exam.results_published = False
     db.session.commit()
     return jsonify(exam=exam_dict(exam), message="Results unpublished")
+
+
+@bp.post("/jobs/monthly-report")
+def run_monthly_report():
+    from ..tasks import send_monthly_report
+
+    data = request.get_json(silent=True) or {}
+    try:
+        year = int(data["year"]) if data.get("year") else None
+        month = int(data["month"]) if data.get("month") else None
+        if month is not None and not 1 <= month <= 12:
+            raise ValueError
+    except (ValueError, TypeError):
+        return err("year and month must be valid numbers")
+    send_monthly_report.delay(year, month)
+    return jsonify(message="Monthly report queued"), 202
+
+
+@bp.post("/jobs/daily-reminders")
+def run_daily_reminders():
+    from ..tasks import send_daily_reminders
+
+    send_daily_reminders.delay()
+    return jsonify(message="Reminder job queued"), 202
