@@ -15,6 +15,15 @@ def create_app():
 
 	db.init_app(app)
 	jwt.init_app(app)
+
+	@jwt.unauthorized_loader
+	def _missing(msg):
+		return {"error": "Missing or invalid token"}, 401
+
+	@jwt.expired_token_loader
+	def _expired(header, payload):
+		return {"error": "Token expired"}, 401
+
 	cache.init_app(app)
 	init_celery(app)
 
