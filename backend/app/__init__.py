@@ -24,6 +24,10 @@ def create_app():
 	def _expired(header, payload):
 		return {"error": "Token expired"}, 401
 
+	@jwt.invalid_token_loader
+	def _invalid(msg):
+		return {"error": "Invalid token"}, 401
+
 	cache.init_app(app)
 	init_celery(app)
 	from . import cache_utils  # noqa: registers invalidation hooks
