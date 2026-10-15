@@ -20,3 +20,4 @@ class Config:
 	CELERY_RESULT_BACKEND = REDIS_URL
 	ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@examzhub.com")
 	ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123")
+	ENFORCE_DATE_WINDOWS = os.getenv("ENFORCE_DATE_WINDOWS", "0") == "1"

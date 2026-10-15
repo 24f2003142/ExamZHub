@@ -171,3 +171,4 @@ class EvaluationScore(db.Model):
 	evaluation_id = db.Column(db.Integer, db.ForeignKey("evaluations.id"), nullable=False)
 	rubric_id = db.Column(db.Integer, db.ForeignKey("rubrics.id"), nullable=False)
 	marks = db.Column(db.Float, nullable=False)
+	rubric = db.relationship("Rubric")
