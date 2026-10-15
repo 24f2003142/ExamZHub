@@ -5,6 +5,7 @@ from flask_jwt_extended import verify_jwt_in_request
 from sqlalchemy import or_
 
 from ..extensions import db
+from ..cache_utils import TTL_STATS, cached
 from ..models import (
     Booking,
     Course,
@@ -111,14 +112,17 @@ def exam_dict(exam, detail=False):
 
 @bp.get("/stats")
 def stats():
-    return jsonify(
-        courses=Course.query.count(),
-        exams=Exam.query.count(),
-        students=User.query.filter_by(role="student").count(),
-        examiners=User.query.filter_by(role="examiner").count(),
-        slots=Slot.query.count(),
-        bookings=Booking.query.count(),
-    )
+    def produce():
+        return dict(
+            courses=Course.query.count(),
+            exams=Exam.query.count(),
+            students=User.query.filter_by(role="student").count(),
+            examiners=User.query.filter_by(role="examiner").count(),
+            slots=Slot.query.count(),
+            bookings=Booking.query.count(),
+        )
+
+    return jsonify(cached("stats", ["admin"], TTL_STATS, produce))
 
 
 @bp.get("/courses")

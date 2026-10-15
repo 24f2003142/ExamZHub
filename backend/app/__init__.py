@@ -1,4 +1,4 @@
-from flask import Flask, render_template
+from flask import Flask, g, render_template
 
 from .celery_app import init_celery
 from .config import Config
@@ -26,6 +26,16 @@ def create_app():
 
 	cache.init_app(app)
 	init_celery(app)
+	from . import cache_utils  # noqa: registers invalidation hooks
+
+	@app.after_request
+	def _cache_header(response):
+		if hasattr(g, "cache_hits") or hasattr(g, "cache_misses"):
+			response.headers["X-Cache"] = (
+				f"hits={getattr(g, 'cache_hits', 0)}; "
+				f"misses={getattr(g, 'cache_misses', 0)}"
+			)
+		return response
 
 	from .routes.auth import bp as auth_bp
 	from .routes.admin import bp as admin_bp

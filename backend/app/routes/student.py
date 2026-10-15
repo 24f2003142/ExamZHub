@@ -7,6 +7,7 @@ from sqlalchemy import or_
 from ..extensions import db
 from ..models import Booking, Course, Exam, Slot
 from ..utils import current_user
+from ..cache_utils import TTL_EXAM, TTL_LIST, TTL_RUBRIC, cached
 
 bp = Blueprint("student", __name__, url_prefix="/api/student")
 
@@ -50,7 +51,7 @@ def active_booking(user_id, exam_id):
     ).first()
 
 
-def exam_dict(exam, user_id):
+def exam_base(exam):
     available_seats = sum(
         slot.available_seats for slot in exam.slots if slot.status == "Available"
     )
@@ -67,8 +68,47 @@ def exam_dict(exam, user_id):
         booking_start=iso(exam.booking_start),
         booking_end=iso(exam.booking_end),
         available_seats=available_seats,
-        already_booked=active_booking(user_id, exam.id) is not None,
     )
+
+
+def booked_exam_ids(user_id):
+    bookings = Booking.query.filter(
+        Booking.student_id == user_id,
+        Booking.status.in_(["Booked", "Completed"]),
+    ).all()
+    return {booking.exam_id for booking in bookings}
+
+
+def slots_for(exam_id):
+    slots = Slot.query.filter(
+        Slot.exam_id == exam_id,
+        Slot.status == "Available",
+        Slot.date >= date.today(),
+    ).order_by(Slot.date, Slot.start_time)
+    return [
+        dict(
+            id=slot.id,
+            date=slot.date.isoformat(),
+            start_time=hm(slot.start_time),
+            end_time=hm(slot.end_time),
+            examiner=slot.examiner.name,
+            capacity=slot.capacity,
+            available_seats=slot.available_seats,
+        )
+        for slot in slots
+    ]
+
+
+def rubrics_for(exam_id):
+    exam = db.session.get(Exam, exam_id)
+    return [
+        dict(
+            criterion=rubric.criterion,
+            max_marks=rubric.max_marks,
+            description=rubric.description,
+        )
+        for rubric in exam.rubrics
+    ]
 
 
 def result_dict(booking):
@@ -154,27 +194,37 @@ def dashboard():
 @bp.get("/exams")
 def list_exams():
     user = current_user()
-    query = Exam.query.join(Course).filter(Exam.status != "Draft")
-    search_term = request.args.get("q", "").strip()
-    if search_term:
-        like = f"%{search_term}%"
-        query = query.filter(
-            or_(
-                Exam.name.ilike(like),
-                Course.name.ilike(like),
-                Course.code.ilike(like),
+    args = {
+        key: request.args.get(key, "").strip()
+        for key in ("q", "course_id", "exam_type", "status", "available")
+    }
+
+    def produce():
+        query = Exam.query.join(Course).filter(Exam.status != "Draft")
+        if args["q"]:
+            like = f"%{args['q']}%"
+            query = query.filter(
+                or_(
+                    Exam.name.ilike(like),
+                    Course.name.ilike(like),
+                    Course.code.ilike(like),
+                )
             )
-        )
-    if request.args.get("course_id"):
-        query = query.filter(Exam.course_id == request.args["course_id"])
-    if request.args.get("exam_type"):
-        query = query.filter(Exam.exam_type == request.args["exam_type"])
-    if request.args.get("status"):
-        query = query.filter(Exam.status == request.args["status"])
-    if request.args.get("available") == "1":
-        query = query.filter(Exam.status == "Booking Open")
-    exams = query.order_by(Exam.id.desc())
-    return jsonify(exams=[exam_dict(exam, user.id) for exam in exams])
+        if args["course_id"]:
+            query = query.filter(Exam.course_id == args["course_id"])
+        if args["exam_type"]:
+            query = query.filter(Exam.exam_type == args["exam_type"])
+        if args["status"]:
+            query = query.filter(Exam.status == args["status"])
+        if args["available"] == "1":
+            query = query.filter(Exam.status == "Booking Open")
+        return [exam_base(exam) for exam in query.order_by(Exam.id.desc())]
+
+    rows = cached("exams", ["list", args], TTL_LIST, produce)
+    booked_ids = booked_exam_ids(user.id)
+    return jsonify(
+        exams=[{**row, "already_booked": row["id"] in booked_ids} for row in rows]
+    )
 
 
 @bp.get("/exams/<int:eid>")
@@ -183,32 +233,17 @@ def get_exam(eid):
     exam = db.session.get(Exam, eid)
     if not exam or exam.status == "Draft":
         return err("Exam not found", 404)
-    slots = Slot.query.filter(
-        Slot.exam_id == eid,
-        Slot.status == "Available",
-        Slot.date >= date.today(),
-    ).order_by(Slot.date, Slot.start_time)
-    data = exam_dict(exam, user.id)
-    data["slots"] = [
-        dict(
-            id=slot.id,
-            date=slot.date.isoformat(),
-            start_time=hm(slot.start_time),
-            end_time=hm(slot.end_time),
-            examiner=slot.examiner.name,
-            capacity=slot.capacity,
-            available_seats=slot.available_seats,
-        )
-        for slot in slots
-    ]
-    data["rubrics"] = [
-        dict(
-            criterion=rubric.criterion,
-            max_marks=rubric.max_marks,
-            description=rubric.description,
-        )
-        for rubric in exam.rubrics
-    ]
+    data = dict(cached("exams", ["detail", eid], TTL_EXAM, lambda: exam_base(exam)))
+    data["already_booked"] = eid in booked_exam_ids(user.id)
+    data["slots"] = cached(
+        "schedule",
+        ["slots", eid, date.today().isoformat()],
+        TTL_LIST,
+        lambda: slots_for(eid),
+    )
+    data["rubrics"] = cached(
+        "rubrics", ["exam", eid], TTL_RUBRIC, lambda: rubrics_for(eid)
+    )
     return jsonify(exam=data)
 
 
