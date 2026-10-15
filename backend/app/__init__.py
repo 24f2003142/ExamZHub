@@ -29,9 +29,11 @@ def create_app():
 
 	from .routes.auth import bp as auth_bp
 	from .routes.admin import bp as admin_bp
+	from .routes.examiner import bp as examiner_bp
 
 	app.register_blueprint(auth_bp)
 	app.register_blueprint(admin_bp)
+	app.register_blueprint(examiner_bp)
 
 	from . import tasks
 
