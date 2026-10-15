@@ -5,8 +5,18 @@ from flask_jwt_extended import verify_jwt_in_request
 from sqlalchemy import or_
 
 from ..extensions import db
-from ..models import Booking, Course, Exam, ExaminerProfile, Rubric, Slot, User
+from ..models import (
+    Booking,
+    Course,
+    Evaluation,
+    Exam,
+    ExaminerProfile,
+    Rubric,
+    Slot,
+    User,
+)
 from ..utils import EMAIL_RE, current_user
+from .examiner import overlaps
 
 bp = Blueprint("admin", __name__, url_prefix="/api/admin")
 
@@ -603,3 +613,209 @@ def search():
             for booking in bookings
         ]
     return jsonify(results)
+
+
+def hm(value):
+    return value.strftime("%H:%M")
+
+
+def slot_dict(slot):
+    return dict(
+        id=slot.id,
+        exam_id=slot.exam_id,
+        exam=slot.exam.name,
+        examiner_id=slot.examiner_id,
+        examiner=slot.examiner.name,
+        date=slot.date.isoformat(),
+        start_time=hm(slot.start_time),
+        end_time=hm(slot.end_time),
+        capacity=slot.capacity,
+        available_seats=slot.available_seats,
+        booked=slot.capacity - slot.available_seats,
+        status=slot.status,
+        meeting_link=slot.meeting_link,
+    )
+
+
+def booking_dict(booking):
+    evaluation = booking.evaluation
+    return dict(
+        id=booking.id,
+        status=booking.status,
+        booking_date=iso(booking.booking_date),
+        student_id=booking.student_id,
+        student=booking.student.name,
+        email=booking.student.email,
+        exam_id=booking.exam_id,
+        exam=booking.exam.name,
+        slot_id=booking.slot_id,
+        examiner=booking.slot.examiner.name,
+        date=booking.slot.date.isoformat(),
+        start_time=hm(booking.slot.start_time),
+        end_time=hm(booking.slot.end_time),
+        evaluation_status=evaluation.status if evaluation else "Pending",
+        total_marks=(
+            evaluation.total_marks
+            if evaluation and evaluation.status == "Submitted"
+            else None
+        ),
+    )
+
+
+@bp.get("/slots")
+def list_slots():
+    query = Slot.query
+    for argument, column in (
+        ("exam_id", Slot.exam_id),
+        ("examiner_id", Slot.examiner_id),
+        ("status", Slot.status),
+    ):
+        if request.args.get(argument):
+            query = query.filter(column == request.args[argument])
+    slots = query.order_by(Slot.date, Slot.start_time)
+    return jsonify(slots=[slot_dict(slot) for slot in slots])
+
+
+@bp.get("/bookings")
+def list_bookings():
+    query = Booking.query
+    for argument, column in (
+        ("exam_id", Booking.exam_id),
+        ("student_id", Booking.student_id),
+        ("status", Booking.status),
+        ("slot_id", Booking.slot_id),
+    ):
+        if request.args.get(argument):
+            query = query.filter(column == request.args[argument])
+    bookings = query.order_by(Booking.id.desc())
+    return jsonify(bookings=[booking_dict(booking) for booking in bookings])
+
+
+@bp.post("/bookings/<int:bid>/reschedule")
+def reschedule(bid):
+    booking = db.session.get(Booking, bid)
+    if not booking:
+        return err("Booking not found", 404)
+    if booking.status != "Booked":
+        return err(f"Cannot reschedule a booking that is {booking.status}", 409)
+    if booking.exam.status not in ("Booking Open", "Closed") or booking.exam.results_published:
+        return err("This exam no longer allows rescheduling", 409)
+
+    data = request.get_json(silent=True) or {}
+    new_slot = db.session.get(Slot, data.get("slot_id") or 0)
+    if not new_slot:
+        return err("Target slot not found", 404)
+    if new_slot.id == booking.slot_id:
+        return err("Booking is already in this slot")
+    if new_slot.exam_id != booking.exam_id:
+        return err("Target slot belongs to a different exam")
+    if new_slot.status != "Available":
+        return err("Target slot is not available", 409)
+
+    old_slot = booking.slot
+    got = (
+        Slot.query.filter(
+            Slot.id == new_slot.id,
+            Slot.available_seats > 0,
+            Slot.status == "Available",
+        )
+        .update(
+            {"available_seats": Slot.available_seats - 1},
+            synchronize_session=False,
+        )
+    )
+    if got == 0:
+        db.session.rollback()
+        return err("Target slot is full", 409)
+    Slot.query.filter(Slot.id == old_slot.id).update(
+        {"available_seats": Slot.available_seats + 1},
+        synchronize_session=False,
+    )
+    booking.slot_id = new_slot.id
+    db.session.flush()
+    db.session.refresh(old_slot)
+    db.session.refresh(new_slot)
+    if new_slot.available_seats == 0:
+        new_slot.status = "Full"
+    if old_slot.status == "Full" and old_slot.available_seats > 0:
+        old_slot.status = "Available"
+    db.session.commit()
+    return jsonify(booking=booking_dict(booking), message="Booking rescheduled")
+
+
+@bp.put("/slots/<int:sid>/examiner")
+def reassign_slot_examiner(sid):
+    slot = db.session.get(Slot, sid)
+    if not slot:
+        return err("Slot not found", 404)
+    if slot.status in ("Completed", "Cancelled"):
+        return err(f"Cannot change examiner of a {slot.status} slot", 409)
+    data = request.get_json(silent=True) or {}
+    examiner = db.session.get(User, data.get("examiner_id") or 0)
+    if not examiner or examiner.role != "examiner" or not examiner.is_active:
+        return err("Invalid or inactive examiner")
+    if examiner.id == slot.examiner_id:
+        return err("Slot already belongs to this examiner")
+    if examiner not in slot.exam.examiners:
+        return err("Examiner is not assigned to this exam")
+    if overlaps(examiner.id, slot.date, slot.start_time, slot.end_time):
+        return err("New examiner has an overlapping slot", 409)
+    slot.examiner_id = examiner.id
+    db.session.commit()
+    return jsonify(slot=slot_dict(slot), message="Examiner changed")
+
+
+@bp.get("/exams/<int:eid>/results")
+def exam_results(eid):
+    exam = db.session.get(Exam, eid)
+    if not exam:
+        return err("Exam not found", 404)
+    evaluations = Evaluation.query.join(Booking).filter(Booking.exam_id == eid).all()
+    return jsonify(
+        exam=exam.name,
+        max_marks=exam.max_marks,
+        results_published=exam.results_published,
+        results=[
+            dict(
+                booking_id=evaluation.booking_id,
+                student=evaluation.booking.student.name,
+                examiner=db.session.get(User, evaluation.examiner_id).name,
+                total_marks=evaluation.total_marks,
+                remarks=evaluation.remarks,
+                status=evaluation.status,
+                evaluated_on=iso(evaluation.evaluation_date),
+            )
+            for evaluation in evaluations
+        ],
+    )
+
+
+@bp.post("/exams/<int:eid>/publish-results")
+def publish_results(eid):
+    exam = db.session.get(Exam, eid)
+    if not exam:
+        return err("Exam not found", 404)
+    if exam.results_published:
+        return err("Results already published", 409)
+    if exam.status not in ("Closed", "Completed"):
+        return err("Close booking before publishing results", 409)
+    pending = Booking.query.filter_by(exam_id=eid, status="Booked").count()
+    if pending:
+        return err(f"{pending} evaluation(s) still pending", 409)
+    if not Booking.query.filter_by(exam_id=eid, status="Completed").first():
+        return err("No evaluated bookings to publish", 409)
+    exam.results_published = True
+    db.session.commit()
+    return jsonify(exam=exam_dict(exam), message="Results published")
+
+
+@bp.post("/exams/<int:eid>/unpublish-results")
+def unpublish_results(eid):
+    exam = db.session.get(Exam, eid)
+    if not exam:
+        return err("Exam not found", 404)
+    if not exam.results_published:
+        return err("Results are not published", 409)
+    exam.results_published = False
+    db.session.commit()
+    return jsonify(exam=exam_dict(exam), message="Results unpublished")
