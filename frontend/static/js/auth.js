@@ -48,7 +48,7 @@ EZ.page('page-register', {
         <input class="form-control mb-2" type="email" v-model="form.email" placeholder="Email" required>
         <input class="form-control mb-2" type="password" v-model="form.password" placeholder="Password (min 6)" required minlength="6">
         <select class="form-select mb-2" v-model.number="form.department_id" required><option value="" disabled>Choose your department</option><option v-for="department in departments" :key="department.id" :value="department.id">{{ department.code }} - {{ department.name }}</option></select>
-        <div class="row g-2"><div class="col-6"><input class="form-control mb-2" type="number" min="1" v-model.number="form.year" placeholder="Year" required></div><div class="col-6"><input class="form-control mb-2" type="number" min="1" v-model.number="form.semester" placeholder="Semester" required></div></div>
+        <div class="row g-2"><div class="col-6"><select class="form-select mb-2" v-model.number="form.year" required><option value="" disabled>Year</option><option v-for="value in 6" :key="value" :value="value">Year {{ value }}</option></select></div><div class="col-6"><select class="form-select mb-2" v-model.number="form.semester" required><option value="" disabled>Semester</option><option v-for="value in 12" :key="value" :value="value">Semester {{ value }}</option></select></div></div>
         <input class="form-control mb-2" v-model="form.roll_no" placeholder="Roll number (optional)">
         <input class="form-control mb-3" v-model="form.phone" placeholder="Phone (optional)" pattern="[0-9+ -]{7,15}" title="7 to 15 digits">
         <button class="btn btn-primary w-100" :disabled="busy">{{ busy ? 'Registering...' : 'Register' }}</button>
