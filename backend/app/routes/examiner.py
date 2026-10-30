@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import verify_jwt_in_request
 
 from ..extensions import db
-from ..models import Booking, Evaluation, EvaluationScore, Exam, Slot
+from ..models import Booking, Evaluation, EvaluationScore, Exam, ExaminerAllocation, Slot
 from ..utils import current_user
 
 bp = Blueprint("examiner", __name__, url_prefix="/api/examiner")
@@ -76,6 +76,13 @@ def my_bookings(user_id, *statuses):
     if statuses:
         query = query.filter(Booking.status.in_(statuses))
     return query
+
+
+def evaluation_limit(exam, examiner_id):
+    allocation = ExaminerAllocation.query.filter_by(
+        exam_id=exam.id, examiner_id=examiner_id
+    ).first()
+    return allocation.max_marks if allocation else exam.max_marks
 
 
 def read_slot(data, base=None):
@@ -284,7 +291,7 @@ def get_evaluation(bid):
         ],
         remarks=evaluation.remarks if evaluation else None,
         total_marks=evaluation.total_marks if evaluation else None,
-        max_marks=booking.exam.max_marks,
+        max_marks=evaluation_limit(booking.exam, booking.slot.examiner_id),
     )
 
 
@@ -335,6 +342,9 @@ def evaluate(bid):
         for rubric_id, marks in given_scores.items()
     ]
     evaluation.total_marks = round(sum(given_scores.values()), 2)
+    limit = evaluation_limit(exam, booking.slot.examiner_id)
+    if evaluation.total_marks > limit:
+        return err(f"Marks cannot exceed this examiner's allocation of {limit:g}", 409)
     evaluation.remarks = (data.get("remarks") or "").strip()
     evaluation.evaluation_date = datetime.utcnow()
     evaluation.status = "Submitted"
@@ -344,7 +354,7 @@ def evaluate(bid):
     return jsonify(
         message="Evaluation submitted",
         total_marks=evaluation.total_marks,
-        max_marks=exam.max_marks,
+        max_marks=limit,
     )
 
 

@@ -1,16 +1,18 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import verify_jwt_in_request
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from ..extensions import db
 from ..cache_utils import TTL_STATS, cached
 from ..models import (
     Booking,
     Course,
+    Department,
     Evaluation,
     Exam,
+    ExaminerAllocation,
     ExaminerProfile,
     Rubric,
     Slot,
@@ -75,6 +77,15 @@ def course_dict(course):
     )
 
 
+def department_dict(department):
+    return dict(
+        id=department.id,
+        code=department.code,
+        name=department.name,
+        is_active=department.is_active,
+    )
+
+
 def rubric_dict(rubric):
     return dict(
         id=rubric.id,
@@ -92,6 +103,10 @@ def exam_dict(exam, detail=False):
         course_id=exam.course_id,
         course=exam.course.name if exam.course else None,
         course_code=exam.course.code if exam.course else None,
+        department_id=exam.department_id,
+        department=exam.department.name if exam.department else None,
+        year=exam.year,
+        semester=exam.semester,
         name=exam.name,
         exam_type=exam.exam_type,
         duration=exam.duration,
@@ -103,8 +118,17 @@ def exam_dict(exam, detail=False):
     )
     if detail:
         data["rubrics"] = [rubric_dict(rubric) for rubric in exam.rubrics]
+        allocations = {
+            allocation.examiner_id: allocation.max_marks
+            for allocation in exam.allocations
+        }
         data["examiners"] = [
-            dict(id=user.id, name=user.name, email=user.email)
+            dict(
+                id=user.id,
+                name=user.name,
+                email=user.email,
+                marks_allocated=allocations.get(user.id),
+            )
             for user in exam.examiners
         ]
     return data
@@ -123,6 +147,58 @@ def stats():
         )
 
     return jsonify(cached("stats", ["admin"], TTL_STATS, produce))
+
+
+@bp.get("/analytics")
+def analytics():
+    def produce():
+        popular = (
+            db.session.query(Exam.name, func.count(Booking.id))
+            .outerjoin(
+                Booking,
+                (Booking.exam_id == Exam.id) & (Booking.status != "Cancelled"),
+            )
+            .group_by(Exam.id, Exam.name)
+            .order_by(func.count(Booking.id).desc())
+            .limit(8)
+            .all()
+        )
+        workload = (
+            db.session.query(
+                User.name,
+                func.count(func.distinct(Slot.id)),
+                func.count(Booking.id),
+            )
+            .select_from(User)
+            .filter(User.role == "examiner")
+            .outerjoin(Slot, Slot.examiner_id == User.id)
+            .outerjoin(
+                Booking,
+                (Booking.slot_id == Slot.id) & (Booking.status != "Cancelled"),
+            )
+            .group_by(User.id, User.name)
+            .all()
+        )
+        since = datetime.utcnow() - timedelta(days=29)
+        per_day = dict(
+            db.session.query(
+                func.date(Booking.booking_date), func.count(Booking.id)
+            )
+            .filter(Booking.booking_date >= since)
+            .group_by(func.date(Booking.booking_date))
+            .all()
+        )
+        days = [(since + timedelta(days=index)).date().isoformat() for index in range(30)]
+        return dict(
+            popular=[dict(name=name, bookings=count) for name, count in popular],
+            workload=[
+                dict(name=name, slots=slots, bookings=bookings)
+                for name, slots, bookings in workload
+            ],
+            trend=dict(labels=days, values=[per_day.get(day, 0) for day in days]),
+        )
+
+    return jsonify(cached("stats", ["analytics"], TTL_STATS, produce))
 
 
 @bp.get("/courses")
@@ -201,6 +277,59 @@ def delete_course(cid):
     return jsonify(message="Deleted")
 
 
+@bp.get("/departments")
+def list_departments():
+    query = Department.query
+    search_term = request.args.get("q", "").strip()
+    if search_term:
+        query = query.filter(
+            or_(
+                Department.code.ilike(f"%{search_term}%"),
+                Department.name.ilike(f"%{search_term}%"),
+            )
+        )
+    return jsonify(departments=[department_dict(department) for department in query.order_by(Department.name)])
+
+
+@bp.post("/departments")
+def create_department():
+    data = request.get_json(silent=True) or {}
+    code = (data.get("code") or "").strip().upper()
+    name = (data.get("name") or "").strip()
+    if not code or not name:
+        return err("Department code and name are required")
+    if Department.query.filter_by(code=code).first():
+        return err("Department code already exists", 409)
+    department = Department(code=code, name=name, is_active=True)
+    db.session.add(department)
+    db.session.commit()
+    return jsonify(department=department_dict(department)), 201
+
+
+@bp.put("/departments/<int:did>")
+def update_department(did):
+    department = db.session.get(Department, did)
+    if not department:
+        return err("Department not found", 404)
+    data = request.get_json(silent=True) or {}
+    if "code" in data:
+        code = (data["code"] or "").strip().upper()
+        if not code:
+            return err("Department code cannot be empty")
+        if Department.query.filter(Department.code == code, Department.id != did).first():
+            return err("Department code already exists", 409)
+        department.code = code
+    if "name" in data:
+        name = (data["name"] or "").strip()
+        if not name:
+            return err("Department name cannot be empty")
+        department.name = name
+    if "is_active" in data:
+        department.is_active = bool(data["is_active"])
+    db.session.commit()
+    return jsonify(department=department_dict(department))
+
+
 def fill_exam(exam, data, creating):
     if creating or "course_id" in data:
         if not db.session.get(Course, data.get("course_id") or 0):
@@ -220,6 +349,20 @@ def fill_exam(exam, data, creating):
         exam.duration = pos_int(data.get("duration"), "Duration")
     if creating or "max_marks" in data:
         exam.max_marks = pos_int(data.get("max_marks"), "Maximum marks")
+    if creating or "department_id" in data:
+        department = db.session.get(Department, data.get("department_id") or 0)
+        if not department or not department.is_active:
+            raise ValueError("An active department is required")
+        exam.department_id = department.id
+    for field, label in (("year", "Year"), ("semester", "Semester")):
+        if creating or field in data:
+            try:
+                value = int(data.get(field))
+            except (ValueError, TypeError):
+                raise ValueError(f"{label} must be a number")
+            if value < 1:
+                raise ValueError(f"{label} must be greater than 0")
+            setattr(exam, field, value)
     for field in DT_FIELDS:
         if field in data:
             setattr(exam, field, parse_dt(data[field]))
@@ -354,7 +497,39 @@ def assign_examiners(eid):
     ).all()
     if len(examiners) != len(set(examiner_ids)):
         return err("One or more examiner ids are invalid or inactive")
+    if not examiners:
+        return err("Select at least one examiner")
+    data = request.get_json(silent=True) or {}
+    allocation_rows = data.get("allocations") or []
+    allocation_map = {}
+    for row in allocation_rows:
+        if row.get("max_marks") in (None, ""):
+            continue
+        try:
+            examiner_id = int(row.get("examiner_id"))
+            max_marks = float(row.get("max_marks"))
+        except (AttributeError, TypeError, ValueError):
+            return err("Each examiner allocation needs an examiner and marks")
+        if examiner_id not in {examiner.id for examiner in examiners} or max_marks <= 0:
+            return err("Examiner allocations must belong to the selected examiners")
+        allocation_map[examiner_id] = max_marks
+    if not allocation_map:
+        allocation_map = {
+            examiner.id: round(exam.max_marks / len(examiners), 2)
+            for examiner in examiners
+        }
+    if round(sum(allocation_map.values()), 2) != exam.max_marks:
+        return err(f"Examiner allocations must add up to {exam.max_marks}")
     exam.examiners = examiners
+    ExaminerAllocation.query.filter_by(exam_id=eid).delete()
+    for examiner in examiners:
+        db.session.add(
+            ExaminerAllocation(
+                exam_id=eid,
+                examiner_id=examiner.id,
+                max_marks=allocation_map[examiner.id],
+            )
+        )
     db.session.commit()
     return jsonify(exam=exam_dict(exam, detail=True))
 
@@ -464,6 +639,9 @@ def delete_rubric(rid):
 def list_examiners():
     query = User.query.filter_by(role="examiner")
     search_term = request.args.get("q", "").strip()
+    department_id = request.args.get("department_id")
+    if department_id:
+        query = query.filter(ExaminerProfile.department_id == department_id)
     if search_term:
         query = query.filter(
             or_(User.name.ilike(f"%{search_term}%"), User.email.ilike(f"%{search_term}%"))
@@ -486,6 +664,9 @@ def create_examiner():
         return err("Password must be at least 6 characters")
     if User.query.filter_by(email=email).first():
         return err("Email already registered", 409)
+    department = db.session.get(Department, data.get("department_id") or 0)
+    if not department or not department.is_active:
+        return err("An active department is required")
     user = User(name=name, email=email, role="examiner")
     user.set_password(password)
     db.session.add(user)
@@ -493,7 +674,8 @@ def create_examiner():
     db.session.add(
         ExaminerProfile(
             user_id=user.id,
-            department=data.get("department"),
+            department=department.name,
+            department_id=department.id,
             phone=data.get("phone"),
         )
     )
@@ -518,7 +700,12 @@ def update_examiner(uid):
     if "is_active" in data:
         user.is_active = bool(data["is_active"])
     profile = user.examiner_profile or ExaminerProfile(user_id=user.id)
-    profile.department = data.get("department", profile.department)
+    if "department_id" in data:
+        department = db.session.get(Department, data.get("department_id") or 0)
+        if not department or not department.is_active:
+            return err("An active department is required")
+        profile.department_id = department.id
+        profile.department = department.name
     profile.phone = data.get("phone", profile.phone)
     db.session.add(profile)
     db.session.commit()
@@ -810,6 +997,12 @@ def publish_results(eid):
         return err("No evaluated bookings to publish", 409)
     exam.results_published = True
     db.session.commit()
+    try:
+        from ..tasks import notify_results_published
+
+        notify_results_published.delay(eid)
+    except Exception:
+        pass
     return jsonify(exam=exam_dict(exam), message="Results published")
 
 

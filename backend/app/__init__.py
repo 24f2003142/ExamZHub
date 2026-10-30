@@ -1,4 +1,5 @@
-from flask import Flask, g, render_template
+from flask import Flask, g, make_response, render_template, send_from_directory
+from sqlalchemy import inspect, text
 
 from .celery_app import init_celery
 from .config import Config
@@ -57,12 +58,55 @@ def create_app():
 	def index():
 		return render_template("index.html")
 
+	@app.get("/sw.js")
+	def service_worker():
+		response = make_response(
+			send_from_directory(
+				app.static_folder, "sw.js", mimetype="application/javascript"
+			)
+		)
+		response.headers["Cache-Control"] = "no-cache"
+		return response
+
+	@app.get("/manifest.webmanifest")
+	def manifest():
+		return send_from_directory(
+			app.static_folder,
+			"manifest.webmanifest",
+			mimetype="application/manifest+json",
+		)
+
 	with app.app_context():
 		from . import models
 
 		db.create_all()
+		_ensure_schema_compatibility()
 		from .seed import seed_admin
 
 		seed_admin(app)
 
 	return app
+
+
+def _ensure_schema_compatibility():
+	"""Add new nullable academic fields to databases created by older builds."""
+	columns = {
+		"student_profiles": {
+			"department_id": "INTEGER",
+			"year": "INTEGER",
+			"semester": "INTEGER",
+		},
+		"examiner_profiles": {"department_id": "INTEGER"},
+		"exams": {
+			"department_id": "INTEGER",
+			"year": "INTEGER",
+			"semester": "INTEGER",
+		},
+	}
+	inspector = inspect(db.engine)
+	with db.engine.begin() as connection:
+		for table, additions in columns.items():
+			existing = {column["name"] for column in inspector.get_columns(table)}
+			for column, definition in additions.items():
+				if column not in existing:
+					connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}'))

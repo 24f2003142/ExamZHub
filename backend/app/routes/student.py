@@ -1,12 +1,20 @@
 import os
 from datetime import date, datetime, timedelta
 
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import (
+    Blueprint,
+    Response,
+    current_app,
+    jsonify,
+    request,
+    render_template_string,
+    send_file,
+)
 from flask_jwt_extended import verify_jwt_in_request
 from sqlalchemy import or_
 
 from ..extensions import db
-from ..models import Booking, Course, Exam, ExportJob, Notification, Slot
+from ..models import Booking, Course, Exam, ExaminerAllocation, ExportJob, Notification, Slot
 from ..tasks import export_history_csv
 from ..utils import current_user
 from ..cache_utils import TTL_EXAM, TTL_LIST, TTL_RUBRIC, cached
@@ -53,6 +61,39 @@ def active_booking(user_id, exam_id):
     ).first()
 
 
+def active_examiner_booking(user_id, exam_id, examiner_id):
+    return (
+        Booking.query.join(Slot)
+        .filter(
+            Booking.student_id == user_id,
+            Booking.exam_id == exam_id,
+            Slot.examiner_id == examiner_id,
+            Booking.status.in_(["Booked", "Completed"]),
+        )
+        .first()
+    )
+
+
+def eligible_for(user, exam):
+    profile = user.student_profile
+    return bool(
+        profile
+        and profile.department_id
+        and profile.year
+        and profile.semester
+        and exam.department_id == profile.department_id
+        and exam.year == profile.year
+        and exam.semester == profile.semester
+    )
+
+
+def result_limit(booking):
+    allocation = ExaminerAllocation.query.filter_by(
+        exam_id=booking.exam_id, examiner_id=booking.slot.examiner_id
+    ).first()
+    return allocation.max_marks if allocation else booking.exam.max_marks
+
+
 def exam_base(exam):
     available_seats = sum(
         slot.available_seats for slot in exam.slots if slot.status == "Available"
@@ -62,6 +103,10 @@ def exam_base(exam):
         name=exam.name,
         course=exam.course.name,
         course_code=exam.course.code,
+        department_id=exam.department_id,
+        department=exam.department.name if exam.department else None,
+        year=exam.year,
+        semester=exam.semester,
         exam_type=exam.exam_type,
         duration=exam.duration,
         max_marks=exam.max_marks,
@@ -90,6 +135,7 @@ def slots_for(exam_id):
     return [
         dict(
             id=slot.id,
+            examiner_id=slot.examiner_id,
             date=slot.date.isoformat(),
             start_time=hm(slot.start_time),
             end_time=hm(slot.end_time),
@@ -123,7 +169,7 @@ def result_dict(booking):
         return None
     return dict(
         total_marks=evaluation.total_marks,
-        max_marks=booking.exam.max_marks,
+        max_marks=result_limit(booking),
         remarks=evaluation.remarks,
         examiner=booking.slot.examiner.name,
         evaluated_on=iso(evaluation.evaluation_date),
@@ -203,6 +249,14 @@ def list_exams():
 
     def produce():
         query = Exam.query.join(Course).filter(Exam.status != "Draft")
+        profile = user.student_profile
+        if not profile:
+            return []
+        query = query.filter(
+            Exam.department_id == profile.department_id,
+            Exam.year == profile.year,
+            Exam.semester == profile.semester,
+        )
         if args["q"]:
             like = f"%{args['q']}%"
             query = query.filter(
@@ -222,7 +276,13 @@ def list_exams():
             query = query.filter(Exam.status == "Booking Open")
         return [exam_base(exam) for exam in query.order_by(Exam.id.desc())]
 
-    rows = cached("exams", ["list", args], TTL_LIST, produce)
+    profile = user.student_profile
+    rows = cached(
+        "exams",
+        ["list", args, profile.department_id if profile else None, profile.year if profile else None, profile.semester if profile else None],
+        TTL_LIST,
+        produce,
+    )
     booked_ids = booked_exam_ids(user.id)
     return jsonify(
         exams=[{**row, "already_booked": row["id"] in booked_ids} for row in rows]
@@ -233,7 +293,7 @@ def list_exams():
 def get_exam(eid):
     user = current_user()
     exam = db.session.get(Exam, eid)
-    if not exam or exam.status == "Draft":
+    if not exam or exam.status == "Draft" or not eligible_for(user, exam):
         return err("Exam not found", 404)
     data = dict(cached("exams", ["detail", eid], TTL_EXAM, lambda: exam_base(exam)))
     data["already_booked"] = eid in booked_exam_ids(user.id)
@@ -243,6 +303,15 @@ def get_exam(eid):
         TTL_LIST,
         lambda: slots_for(eid),
     )
+    booked_examiners = {
+        slot.examiner_id
+        for slot in Slot.query.filter_by(exam_id=eid).all()
+        if active_examiner_booking(user.id, eid, slot.examiner_id)
+    }
+    data["slots"] = [
+        {**slot, "already_booked": slot["examiner_id"] in booked_examiners}
+        for slot in data["slots"]
+    ]
     data["rubrics"] = cached(
         "rubrics", ["exam", eid], TTL_RUBRIC, lambda: rubrics_for(eid)
     )
@@ -257,14 +326,16 @@ def book():
     if not slot:
         return err("Slot not found", 404)
     exam = slot.exam
+    if not eligible_for(user, exam):
+        return err("This exam is not available for your department, year, or semester", 403)
     if exam.status != "Booking Open" or not in_window(
         exam.booking_start, exam.booking_end
     ):
         return err("Booking is not open for this exam", 409)
     if slot.status in ("Cancelled", "Completed") or slot.date < date.today():
         return err("This slot is not available", 409)
-    if active_booking(user.id, exam.id):
-        return err("You already have a booking for this exam", 409)
+    if active_examiner_booking(user.id, exam.id, slot.examiner_id):
+        return err("You already have a booking with this examiner for this exam", 409)
 
     got = (
         Slot.query.filter(
@@ -337,6 +408,65 @@ def results():
         student_id=user.id, status="Completed"
     ).order_by(Booking.id.desc())
     return jsonify(results=[booking_dict(booking) for booking in rows if result_dict(booking)])
+
+
+SCORECARD_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Scorecard</title>
+<style>body{font-family:Arial,sans-serif;max-width:680px;margin:30px auto;color:#222}
+h1{color:#0d6efd;margin-bottom:0}table{border-collapse:collapse;width:100%;margin:16px 0}
+td,th{border:1px solid #ccc;padding:8px;text-align:left}.total{font-size:22px}
+.btn{padding:8px 16px;background:#0d6efd;color:#fff;border:0;border-radius:4px;cursor:pointer}
+@media print{.btn{display:none}}</style></head><body>
+<h1>ExamZHub</h1><p>Examination Scorecard</p>
+<table><tr><th>Student</th><td>{{ name }}</td><th>Roll no</th><td>{{ roll or '-' }}</td></tr>
+<tr><th>Examination</th><td>{{ exam }}</td><th>Course</th><td>{{ course }}</td></tr>
+<tr><th>Date</th><td>{{ date }}</td><th>Examiner</th><td>{{ examiner }}</td></tr></table>
+<table><tr><th>Criterion</th><th>Marks obtained</th><th>Maximum</th></tr>
+{% for criterion, marks, maximum in rows %}<tr><td>{{ criterion }}</td><td>{{ marks }}</td><td>{{ maximum }}</td></tr>{% endfor %}</table>
+<p class="total">Total: <b>{{ total }}</b> / {{ max_marks }} ({{ pct }}%)</p>
+<p><b>Examiner remarks:</b> {{ remarks or 'None' }}</p>
+<button class="btn" onclick="window.print()">Print / Save as PDF</button></body></html>"""
+
+
+@bp.get("/bookings/<int:bid>/scorecard")
+def scorecard(bid):
+    user = current_user()
+    booking = db.session.get(Booking, bid)
+    if not booking or booking.student_id != user.id:
+        return err("Booking not found", 404)
+    evaluation = booking.evaluation
+    if not (
+        booking.exam.results_published
+        and evaluation
+        and evaluation.status == "Submitted"
+    ):
+        return err("Result is not published yet", 409)
+    profile = user.student_profile
+    html = render_template_string(
+        SCORECARD_HTML,
+        name=user.name,
+        roll=profile.roll_no if profile else None,
+        exam=booking.exam.name,
+        course=booking.exam.course.name,
+        date=booking.slot.date.isoformat(),
+        examiner=booking.slot.examiner.name,
+        rows=[
+            (
+                score.rubric.criterion,
+                f"{score.marks:g}",
+                f"{score.rubric.max_marks:g}",
+            )
+            for score in evaluation.scores
+        ],
+        total=f"{evaluation.total_marks:g}",
+        max_marks=result_limit(booking),
+        pct=round(evaluation.total_marks / result_limit(booking) * 100, 1),
+        remarks=evaluation.remarks,
+    )
+    return Response(
+        html,
+        mimetype="text/html",
+        headers={"Content-Disposition": f'attachment; filename="scorecard_{booking.id}.html"'},
+    )
 
 
 def job_dict(job):

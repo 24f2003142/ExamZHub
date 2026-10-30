@@ -9,7 +9,7 @@ from sqlalchemy import func
 from .celery_app import celery
 from .extensions import db
 from .mailer import post_gchat, send_email
-from .models import Booking, Evaluation, ExportJob, Notification, Slot, User
+from .models import Booking, Evaluation, Exam, ExaminerAllocation, ExportJob, Notification, Slot, User
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +168,62 @@ def send_monthly_report(year=None, month=None):
 		completed=completed or 0,
 		pending=pending or 0,
 	)
+
+
+RESULT_HTML = """
+<div style="font-family:Arial,sans-serif;max-width:520px">
+<h2 style="color:#0d6efd">Your result is published</h2>
+<p>Hi {{ name }}, your result for <b>{{ exam }}</b> ({{ course }}) is now available.</p>
+<p style="font-size:22px"><b>{{ marks }}</b> / {{ max_marks }}</p>
+<p><b>Examiner feedback:</b> {{ remarks or 'No remarks.' }}</p>
+<p>Log in to ExamZHub to see the full breakdown and download your scorecard.</p>
+</div>"""
+
+
+@celery.task(name="examzhub.notify_results")
+def notify_results_published(exam_id):
+	exam = db.session.get(Exam, exam_id)
+	if not exam or not exam.results_published:
+		return dict(sent=0)
+	sent = 0
+	for booking in Booking.query.filter_by(exam_id=exam_id, status="Completed").all():
+		evaluation = booking.evaluation
+		if not evaluation or evaluation.status != "Submitted":
+			continue
+		allocation = ExaminerAllocation.query.filter_by(
+			exam_id=exam_id, examiner_id=booking.slot.examiner_id
+		).first()
+		max_marks = allocation.max_marks if allocation else exam.max_marks
+		try:
+			send_email(
+				booking.student.email,
+				f"Result published: {exam.name}",
+				render_template_string(
+					RESULT_HTML,
+					name=booking.student.name,
+					exam=exam.name,
+					course=exam.course.name,
+					marks=f"{evaluation.total_marks:g}",
+					max_marks=max_marks,
+					remarks=evaluation.remarks,
+				),
+			)
+			sent += 1
+		except Exception:
+			log.exception("Result email failed for booking %s", booking.id)
+		db.session.add(
+			Notification(
+				user_id=booking.student_id,
+				kind="result",
+				link="#/student/bookings",
+				message=(
+					f"Results published for {exam.name}: "
+					f"{evaluation.total_marks:g}/{max_marks:g}"
+				),
+			)
+		)
+	db.session.commit()
+	return dict(sent=sent)
 
 
 @celery.task(name="examzhub.export_history")

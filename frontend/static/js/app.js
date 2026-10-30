@@ -6,6 +6,7 @@ const ROUTES = [
 	['/admin/exams', 'page-admin-exams', 'admin'],
 	['/admin/exams/:id', 'page-admin-exam', 'admin'],
 	['/admin/people', 'page-admin-people', 'admin'],
+	['/admin/departments', 'page-admin-departments', 'admin'],
 	['/admin/bookings', 'page-admin-bookings', 'admin'],
 	['/examiner', 'page-examiner-dashboard', 'examiner'],
 	['/examiner/slots', 'page-examiner-slots', 'examiner'],
@@ -63,14 +64,16 @@ window.addEventListener('hashchange', EZ.resolve);
 const app = Vue.createApp({
 	computed: { state() { return EZ.state; } },
 	template: `
-	<div>
+	<div class="app-shell" :class="{ 'has-user': !!state.user, 'sidebar-is-collapsed': state.sidebarCollapsed, 'sidebar-is-open': state.mobileSidebarOpen }">
 		<ez-nav v-if="state.user"></ez-nav>
-		<div class="toast-wrap" aria-live="polite" aria-atomic="true">
-			<div v-for="toast in state.toasts" :key="toast.id" class="alert shadow-sm py-2 mb-2" :class="'alert-' + toast.type">{{ toast.message }}</div>
+		<div class="app-content">
+			<div class="toast-wrap" aria-live="polite" aria-atomic="true">
+				<div v-for="toast in state.toasts" :key="toast.id" class="alert shadow-sm py-2 mb-2" :class="'alert-' + toast.type">{{ toast.message }}</div>
+			</div>
+			<main class="app-main container-fluid px-4 py-4" :class="{ 'auth-main': !state.user }">
+				<component v-if="state.view" :is="state.view.component" :key="state.view.key" :params="state.view.params"></component>
+			</main>
 		</div>
-		<main class="container py-4">
-			<component v-if="state.view" :is="state.view.component" :key="state.view.key" :params="state.view.params"></component>
-		</main>
 	</div>`,
 });
 
@@ -80,3 +83,7 @@ app.config.globalProperties.$fmt = EZ.fmt;
 app.config.globalProperties.$ez = EZ;
 EZ.resolve();
 app.mount('#app');
+
+if ('serviceWorker' in navigator) {
+	window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}

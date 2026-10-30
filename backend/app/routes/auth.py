@@ -2,10 +2,18 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token, jwt_required
 
 from ..extensions import cache, db
-from ..models import StudentProfile, User
+from ..models import Department, StudentProfile, User
 from ..utils import EMAIL_RE, current_user
 
 bp = Blueprint("auth", __name__, url_prefix="/api")
+
+
+@bp.get("/departments")
+def departments():
+	rows = Department.query.filter_by(is_active=True).order_by(Department.name).all()
+	return jsonify(
+		departments=[dict(id=row.id, code=row.code, name=row.name) for row in rows]
+	)
 
 
 @bp.get("/health")
@@ -38,6 +46,16 @@ def register():
 		return jsonify(error="Invalid email"), 400
 	if len(password) < 6:
 		return jsonify(error="Password must be at least 6 characters"), 400
+	department = db.session.get(Department, data.get("department_id") or 0)
+	if not department or not department.is_active:
+		return jsonify(error="Select an active department"), 400
+	try:
+		year = int(data.get("year"))
+		semester = int(data.get("semester"))
+	except (ValueError, TypeError):
+		return jsonify(error="Year and semester are required"), 400
+	if year < 1 or semester < 1:
+		return jsonify(error="Year and semester must be greater than 0"), 400
 	if User.query.filter_by(email=email).first():
 		return jsonify(error="Email already registered"), 409
 
@@ -50,6 +68,9 @@ def register():
 			user_id=user.id,
 			roll_no=data.get("roll_no"),
 			phone=data.get("phone"),
+			department_id=department.id,
+			year=year,
+			semester=semester,
 		)
 	)
 	db.session.commit()
@@ -92,6 +113,20 @@ def update_me():
 			"roll_no", user.student_profile.roll_no
 		)
 		user.student_profile.phone = data.get("phone", user.student_profile.phone)
+		if "department_id" in data:
+			department = db.session.get(Department, data.get("department_id") or 0)
+			if not department or not department.is_active:
+				return jsonify(error="Select an active department"), 400
+			user.student_profile.department_id = department.id
+		try:
+			if "year" in data:
+				user.student_profile.year = int(data["year"])
+			if "semester" in data:
+				user.student_profile.semester = int(data["semester"])
+		except (ValueError, TypeError):
+			return jsonify(error="Year and semester must be numbers"), 400
+		if (user.student_profile.year or 0) < 1 or (user.student_profile.semester or 0) < 1:
+			return jsonify(error="Year and semester must be greater than 0"), 400
 	if user.role == "examiner" and user.examiner_profile:
 		user.examiner_profile.phone = data.get("phone", user.examiner_profile.phone)
 	db.session.commit()

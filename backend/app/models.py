@@ -34,11 +34,21 @@ class User(db.Model):
 			"is_active": self.is_active,
 		}
 		if self.role == "student" and self.student_profile:
-			data.update(roll_no=self.student_profile.roll_no, phone=self.student_profile.phone)
-		if self.role == "examiner" and self.examiner_profile:
+			profile = self.student_profile
 			data.update(
-				department=self.examiner_profile.department,
-				phone=self.examiner_profile.phone,
+				roll_no=profile.roll_no,
+				phone=profile.phone,
+				department_id=profile.department_id,
+				department=profile.department.name if profile.department else None,
+				year=profile.year,
+				semester=profile.semester,
+			)
+		if self.role == "examiner" and self.examiner_profile:
+			profile = self.examiner_profile
+			data.update(
+				department=profile.department or (profile.department_ref.name if profile.department_ref else None),
+				department_id=profile.department_id,
+				phone=profile.phone,
 			)
 		return data
 
@@ -49,6 +59,7 @@ class ExaminerProfile(db.Model):
 	id = db.Column(db.Integer, primary_key=True)
 	user_id = db.Column(db.Integer, db.ForeignKey("users.id"), unique=True, nullable=False)
 	department = db.Column(db.String(100))
+	department_id = db.Column(db.Integer, db.ForeignKey("departments.id"))
 	phone = db.Column(db.String(20))
 
 
@@ -59,6 +70,22 @@ class StudentProfile(db.Model):
 	user_id = db.Column(db.Integer, db.ForeignKey("users.id"), unique=True, nullable=False)
 	roll_no = db.Column(db.String(50))
 	phone = db.Column(db.String(20))
+	department_id = db.Column(db.Integer, db.ForeignKey("departments.id"))
+	year = db.Column(db.Integer)
+	semester = db.Column(db.Integer)
+
+
+class Department(db.Model):
+	__tablename__ = "departments"
+
+	id = db.Column(db.Integer, primary_key=True)
+	code = db.Column(db.String(20), unique=True, nullable=False)
+	name = db.Column(db.String(120), nullable=False)
+	is_active = db.Column(db.Boolean, default=True)
+
+	students = db.relationship("StudentProfile", backref="department")
+	exams = db.relationship("Exam", backref="department")
+	examiner_profiles = db.relationship("ExaminerProfile", backref="department_ref")
 
 
 class Course(db.Model):
@@ -84,6 +111,9 @@ class Exam(db.Model):
 
 	id = db.Column(db.Integer, primary_key=True)
 	course_id = db.Column(db.Integer, db.ForeignKey("courses.id"), nullable=False)
+	department_id = db.Column(db.Integer, db.ForeignKey("departments.id"))
+	year = db.Column(db.Integer)
+	semester = db.Column(db.Integer)
 	name = db.Column(db.String(150), nullable=False)
 	exam_type = db.Column(db.String(30), nullable=False)
 	duration = db.Column(db.Integer, nullable=False)
@@ -102,6 +132,21 @@ class Exam(db.Model):
 	examiners = db.relationship(
 		"User", secondary=exam_examiners, backref="assigned_exams"
 	)
+	allocations = db.relationship(
+		"ExaminerAllocation", backref="exam", cascade="all, delete-orphan"
+	)
+
+
+class ExaminerAllocation(db.Model):
+	__tablename__ = "examiner_allocations"
+	__table_args__ = (db.UniqueConstraint("exam_id", "examiner_id"),)
+
+	id = db.Column(db.Integer, primary_key=True)
+	exam_id = db.Column(db.Integer, db.ForeignKey("exams.id"), nullable=False)
+	examiner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+	max_marks = db.Column(db.Float, nullable=False)
+
+	examiner = db.relationship("User")
 
 
 class Rubric(db.Model):

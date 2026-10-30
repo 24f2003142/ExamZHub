@@ -6,6 +6,8 @@ EZ.state = Vue.reactive({
   toasts: [],
   view: null,
   unread: 0,
+  sidebarCollapsed: false,
+  mobileSidebarOpen: false,
 });
 
 EZ.page = (name, definition) => {
@@ -96,22 +98,30 @@ EZ.badge = status => ({
 }[status] || 'secondary');
 
 EZ.C['ez-nav'] = {
-  data: () => ({ open: false }),
   computed: {
     state() { return EZ.state; },
     viewKey() { return EZ.state.view && EZ.state.view.key; },
     links() {
       return ({
-        admin: [['Dashboard', '/admin'], ['Courses', '/admin/courses'], ['Exams', '/admin/exams'], ['People', '/admin/people'], ['Slots & Bookings', '/admin/bookings']],
-        examiner: [['Dashboard', '/examiner'], ['My Slots', '/examiner/slots'], ['Booked Students', '/examiner/bookings']],
-        student: [['Dashboard', '/student'], ['Exams', '/student/exams'], ['My Bookings', '/student/bookings'], ['Notifications', '/student/notifications'], ['Profile', '/student/profile']],
+        admin: [['Dashboard', '/admin'], ['Courses', '/admin/courses'], ['Exams', '/admin/exams'], ['People', '/admin/people'], ['Departments', '/admin/departments'], ['Slots & Bookings', '/admin/bookings'], ['Logout', '#logout']],
+        examiner: [['Dashboard', '/examiner'], ['My Slots', '/examiner/slots'], ['Booked Students', '/examiner/bookings'], ['Logout', '#logout']],
+        student: [['Dashboard', '/student'], ['Exams', '/student/exams'], ['My Bookings', '/student/bookings'], ['Notifications', '/student/notifications'], ['Profile', '/student/profile'], ['Logout', '#logout']],
       })[EZ.state.user.role] || [];
     },
   },
-  watch: { viewKey() { this.open = false; this.refreshUnread(); } },
+  watch: { viewKey() { EZ.state.mobileSidebarOpen = false; this.refreshUnread(); } },
   mounted() { this.refreshUnread(); },
   methods: {
     active(path) { return EZ.state.view && EZ.state.view.key === path; },
+    navigate(link) {
+      if (link[1] === '#logout') this.logout();
+      else EZ.go('#' + link[1]);
+    },
+    toggleDesktop() { EZ.state.sidebarCollapsed = !EZ.state.sidebarCollapsed; },
+    toggleMobile() {
+      if (window.innerWidth < 768) EZ.state.sidebarCollapsed = false;
+      EZ.state.mobileSidebarOpen = !EZ.state.mobileSidebarOpen;
+    },
     async refreshUnread() {
       if (EZ.state.user.role !== 'student') return;
       try { EZ.state.unread = (await EZ.api('GET', '/student/notifications')).unread; } catch (_) { /* navbar remains usable */ }
@@ -119,33 +129,36 @@ EZ.C['ez-nav'] = {
     logout() { EZ.logout(); EZ.go('#/login'); },
   },
   template: `
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-    <div class="container">
-      <a class="navbar-brand" href="#/">Exam<b>Z</b>Hub</a>
-      <button class="navbar-toggler" type="button" aria-label="Toggle navigation" @click="open = !open"><span class="navbar-toggler-icon"></span></button>
-      <div class="collapse navbar-collapse" :class="{ show: open }">
-        <ul class="navbar-nav me-auto">
-          <li class="nav-item" v-for="link in links" :key="link[1]">
-            <a class="nav-link" :class="{ active: active(link[1]) }" :href="'#' + link[1]">{{ link[0] }}
-              <span v-if="link[1] === '/student/notifications' && state.unread" class="badge bg-danger ms-1">{{ state.unread }}</span>
-            </a>
-          </li>
-        </ul>
-        <span class="navbar-text me-3">{{ state.user.name }} <span class="badge bg-secondary text-capitalize">{{ state.user.role }}</span></span>
-        <button class="btn btn-outline-light btn-sm" @click="logout">Logout</button>
+  <div class="sidebar-frame">
+    <button class="sidebar-mobile-toggle" type="button" aria-label="Open navigation" @click="toggleMobile"><span class="sidebar-menu-icon" aria-hidden="true"></span></button>
+    <button v-if="state.mobileSidebarOpen" class="sidebar-scrim" type="button" aria-label="Close navigation" @click="toggleMobile"></button>
+    <aside class="ez-sidebar" :class="{ 'is-collapsed': state.sidebarCollapsed, 'is-open': state.mobileSidebarOpen }">
+      <div class="sidebar-heading">
+        <a class="sidebar-brand" href="#/" :title="state.sidebarCollapsed ? 'ExamZHub' : ''"><span v-if="state.sidebarCollapsed" class="brand-mark">Z</span><span v-else>Exam<span>Z</span>Hub</span></a>
+        <button class="sidebar-collapse-button" type="button" :aria-label="state.sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'" :title="state.sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'" @click="toggleDesktop"><span>{{ state.sidebarCollapsed ? '+' : '−' }}</span></button>
       </div>
-    </div>
-  </nav>`,
+      <div class="sidebar-section-label" v-if="!state.sidebarCollapsed">Workspace</div>
+      <nav class="sidebar-links" aria-label="Main navigation">
+        <a v-for="link in links" :key="link[1]" class="sidebar-link" :class="{ 'is-active': link[1] !== '#logout' && active(link[1]), 'sidebar-logout-link': link[1] === '#logout' }" :href="link[1] === '#logout' ? undefined : '#' + link[1]" :role="link[1] === '#logout' ? 'button' : undefined" :title="state.sidebarCollapsed ? link[0] : ''" @click.prevent="navigate(link)">
+          <span class="sidebar-link-label" v-if="!state.sidebarCollapsed">{{ link[0] }}</span>
+          <span v-if="link[1] === '/student/notifications' && state.unread" class="sidebar-unread" :class="{ 'is-dot': state.sidebarCollapsed }">{{ state.sidebarCollapsed ? '' : state.unread }}</span>
+        </a>
+      </nav>
+    </aside>
+  </div>`,
 };
 
 EZ.C['exam-form'] = {
-  props: ['exam', 'courses'],
+  props: ['exam', 'courses', 'departments'],
   emits: ['saved', 'cancel'],
   data() {
     const exam = this.exam || {};
     return { form: {
       id: exam.id,
       course_id: exam.course_id || '',
+      department_id: exam.department_id || '',
+      year: exam.year || '',
+      semester: exam.semester || '',
       name: exam.name || '',
       exam_type: exam.exam_type || 'Viva',
       duration: exam.duration || 15,
@@ -172,6 +185,9 @@ EZ.C['exam-form'] = {
     <div class="col-md-4"><label class="form-label small">Course</label><select class="form-select" v-model.number="form.course_id" required><option value="" disabled>Select course</option><option v-for="course in courses" :key="course.id" :value="course.id">{{ course.code }} - {{ course.name }}</option></select></div>
     <div class="col-md-4"><label class="form-label small">Exam name</label><input class="form-control" v-model="form.name" required maxlength="150"></div>
     <div class="col-md-4"><label class="form-label small">Type</label><select class="form-select" v-model="form.exam_type"><option>Viva</option><option>Practical</option><option>Project Demo</option><option>Assessment</option></select></div>
+    <div class="col-md-4"><label class="form-label small">Department</label><select class="form-select" v-model.number="form.department_id" required><option value="" disabled>Select department</option><option v-for="department in departments" :key="department.id" :value="department.id">{{ department.code }} - {{ department.name }}</option></select></div>
+    <div class="col-md-2"><label class="form-label small">Year</label><input class="form-control" type="number" min="1" v-model.number="form.year" required></div>
+    <div class="col-md-2"><label class="form-label small">Semester</label><input class="form-control" type="number" min="1" v-model.number="form.semester" required></div>
     <div class="col-md-3"><label class="form-label small">Duration (min)</label><input class="form-control" type="number" min="1" v-model.number="form.duration" required></div>
     <div class="col-md-3"><label class="form-label small">Max marks</label><input class="form-control" type="number" min="1" v-model.number="form.max_marks" required></div>
     <div class="col-md-3"><label class="form-label small">Slot creation start</label><input class="form-control" type="datetime-local" v-model="form.slot_creation_start"></div>
